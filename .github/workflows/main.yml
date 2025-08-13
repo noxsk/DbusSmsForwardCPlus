@@ -22,6 +22,9 @@ on:
 
 env:
   TZ: Asia/Shanghai
+  OPENWRT_TARGET: mediatek
+  OPENWRT_SUBTARGET: filogic
+  OPENWRT_BRANCH: snapshots
 
 jobs:
   build:
@@ -50,21 +53,16 @@ jobs:
     # This version includes detailed logging to debug download issues.
     # -------------------------------------------------------------
     - name: Download and Extract OpenWrt SDK
+      env:
+        TARGET: ${{ env.OPENWRT_TARGET }}
+        SUBTARGET: ${{ env.OPENWRT_SUBTARGET }}
+        BRANCH: ${{ env.OPENWRT_BRANCH }}
       run: |
-        echo "--- Attempting to download SDK ---"
-        wget --no-verbose https://downloads.openwrt.org/releases/23.05.4/targets/ipq807x/generic/openwrt-sdk-23.05.4-ipq807x-generic_gcc-12.3.0_musl.Linux-x86_64.tar.xz || \
-        wget --no-verbose https://downloads.openwrt.org/snapshots/targets/ipq807x/generic/openwrt-sdk-ipq807x-generic_gcc-13.2.0_musl.Linux-x86_64.tar.xz
-        
-        echo "--- Listing downloaded files ---"
-        ls -lh *.tar.xz
-        
-        echo "--- Extracting SDK ---"
-        tar -xf openwrt-sdk-*.tar.xz
-        
-        echo "--- Listing extracted contents ---"
-        ls -l
-        
-        echo "--- Renaming SDK directory ---"
+        echo "--- Fetching SDK info for ${TARGET}/${SUBTARGET} (${BRANCH}) ---"
+        SDK_NAME=$(curl -s https://downloads.openwrt.org/${BRANCH}/targets/${TARGET}/${SUBTARGET}/ | grep -oP 'openwrt-sdk-.*?tar.xz' | head -n 1)
+        wget --no-verbose https://downloads.openwrt.org/${BRANCH}/targets/${TARGET}/${SUBTARGET}/${SDK_NAME}
+        echo "--- Extracting SDK: ${SDK_NAME} ---"
+        tar -xf ${SDK_NAME}
         mv openwrt-sdk-* openwrt-sdk
         echo "--- SDK is ready in 'openwrt-sdk' directory ---"
 
@@ -77,7 +75,8 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
         # Copy the source code into the package directory
-        rsync -a --exclude='.git/' --exclude='.github/' $GITHUB_WORKSPACE/ openwrt-sdk/package/DbusSmsForwardCPlus/
+        mkdir -p package/DbusSmsForwardCPlus
+        rsync -a --exclude='.git/' --exclude='.github/' $GITHUB_WORKSPACE/ package/DbusSmsForwardCPlus/
 
     # -------------------------------------------------------------
     # Step 5: Create Makefiles needed for compilation
@@ -171,5 +170,5 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: DbusSmsForwardCPlus-AW1000-ipk
+        name: DbusSmsForwardCPlus-${{ env.OPENWRT_TARGET }}-${{ env.OPENWRT_SUBTARGET }}
         path: ./artifact/*.ipk
