@@ -1,5 +1,3 @@
-mkdir -p .github/workflows
-cat > .github/workflows/build-openwrt.yml << 'EOF'
 name: Build OpenWrt Package for AW1000
 
 on:
@@ -17,12 +15,12 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04 # 建议使用较新的 ubuntu-22.04
     
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
-      
+      uses: actions/checkout@v4 # 建议使用 v4
+
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -51,38 +49,37 @@ jobs:
     - name: Prepare package
       run: |
         mkdir -p openwrt-sdk/package/DbusSmsForwardCPlus
-        cp -r ./* openwrt-sdk/package/DbusSmsForwardCPlus/ 2>/dev/null || true
-        rm -rf openwrt-sdk/package/DbusSmsForwardCPlus/.git
-        rm -rf openwrt-sdk/package/DbusSmsForwardCPlus/.github
+        # 使用 rsync 更可靠地复制文件，并排除 .git 目录
+        rsync -a --exclude='.git/' --exclude='.github/' ./ openwrt-sdk/package/DbusSmsForwardCPlus/
         
     - name: Create package Makefile
       run: |
         cat > openwrt-sdk/package/DbusSmsForwardCPlus/Makefile << 'EOL'
         include $(TOPDIR)/rules.mk
-        
+
         PKG_NAME:=DbusSmsForwardCPlus
         PKG_VERSION:=1.0.0
         PKG_RELEASE:=1
-        
+
         PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
         PKG_LICENSE:=GPL-3.0
-        
+
         include $(INCLUDE_DIR)/package.mk
-        
+
         define Package/DbusSmsForwardCPlus
           SECTION:=utils
           CATEGORY:=Utilities
           TITLE:=SMS forwarding tool via D-Bus
           DEPENDS:=+dbus +libcurl +libstdcpp +libpthread
         endef
-        
+
         define Build/Prepare
         	mkdir -p $(PKG_BUILD_DIR)
         	$(CP) ./*.cpp $(PKG_BUILD_DIR)/ 2>/dev/null || true
         	$(CP) ./*.h $(PKG_BUILD_DIR)/ 2>/dev/null || true
         	$(CP) ./src/* $(PKG_BUILD_DIR)/ 2>/dev/null || true
         endef
-        
+
         define Build/Compile
         	$(MAKE) -C $(PKG_BUILD_DIR) \
         		CC="$(TARGET_CC)" \
@@ -93,12 +90,12 @@ jobs:
         		LIBS="-ldbus-1 -lcurl -lpthread" \
         		-f $(CURDIR)/Makefile.build
         endef
-        
+
         define Package/DbusSmsForwardCPlus/install
         	$(INSTALL_DIR) $(1)/usr/bin
         	$(INSTALL_BIN) $(PKG_BUILD_DIR)/DbusSmsForwardCPlus $(1)/usr/bin/
         endef
-        
+
         $(eval $(call BuildPackage,DbusSmsForwardCPlus))
         EOL
         
@@ -108,27 +105,34 @@ jobs:
         SOURCES = $(wildcard *.cpp)
         OBJECTS = $(SOURCES:.cpp=.o)
         TARGET = DbusSmsForwardCPlus
-        
+
         CXXFLAGS += -std=c++11 -pthread -Wall -O2
         LIBS += -ldbus-1 -lcurl -lpthread
-        
+
         all: $(TARGET)
-        
+
         $(TARGET): $(OBJECTS)
         	$(CXX) $(OBJECTS) -o $@ $(LDFLAGS) $(LIBS)
-        
+
         %.o: %.cpp
         	$(CXX) $(CXXFLAGS) -c $< -o $@
-        
+
         clean:
         	rm -f $(OBJECTS) $(TARGET)
         EOL
         
-    - name: Generate configuration file
+    - name: Generate configuration file and select packages
       run: |
         cd openwrt-sdk
+        # 生成默认配置
         make defconfig
-        
+        # 在 .config 文件中自动选中我们的包和它的依赖
+        echo "CONFIG_PACKAGE_DbusSmsForwardCPlus=m" >> .config
+        echo "CONFIG_PACKAGE_libcurl=m" >> .config
+        echo "CONFIG_PACKAGE_dbus=m" >> .config
+        # 重新生成最终配置，确保所有依赖项被包含
+        make defconfig
+
     - name: Build package
       run: |
         cd openwrt-sdk
@@ -140,8 +144,7 @@ jobs:
         find openwrt-sdk/bin/ -name "*.ipk" -exec cp {} ./artifact/ \;
         
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4 # 建议使用 v4
       with:
         name: DbusSmsForwardCPlus-AW1000
         path: ./artifact/*.ipk
-EOF
