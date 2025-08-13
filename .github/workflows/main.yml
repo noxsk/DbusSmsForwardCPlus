@@ -22,9 +22,10 @@ on:
 
 env:
   TZ: Asia/Shanghai
-  OPENWRT_TARGET: mediatek
-  OPENWRT_SUBTARGET: filogic
-  OPENWRT_BRANCH: snapshots
+  OPENWRT_TARGET: qualcommax
+  OPENWRT_SUBTARGET: ipq807x
+  OPENWRT_BRANCH: releases/24.10.1
+  OPENWRT_SDK_URL: https://archive.openwrt.org/releases/24.10.1/targets/qualcommax/ipq807x/openwrt-sdk-24.10.1-qualcommax-ipq807x_gcc-13.3.0_musl.Linux-x86_64.tar.zst
 
 jobs:
   build:
@@ -54,19 +55,17 @@ jobs:
     # -------------------------------------------------------------
     - name: Download and Extract OpenWrt SDK
       env:
-        TARGET: ${{ env.OPENWRT_TARGET }}
-        SUBTARGET: ${{ env.OPENWRT_SUBTARGET }}
-        BRANCH: ${{ env.OPENWRT_BRANCH }}
+        SDK_URL: ${{ env.OPENWRT_SDK_URL }}
       run: |
-        echo "--- Fetching SDK info for ${TARGET}/${SUBTARGET} (${BRANCH}) ---"
-        SDK_NAME=$(curl -s https://downloads.openwrt.org/${BRANCH}/targets/${TARGET}/${SUBTARGET}/ | grep -oP 'openwrt-sdk-.*?tar.xz' | head -n 1)
-        if [ -z "$SDK_NAME" ]; then
-          echo "Error: Unable to find OpenWrt SDK archive. Exiting."
+        if [ -z "$SDK_URL" ]; then
+          echo "Error: OPENWRT_SDK_URL is not set. Exiting."
           exit 1
         fi
-        wget --no-verbose https://downloads.openwrt.org/${BRANCH}/targets/${TARGET}/${SUBTARGET}/${SDK_NAME}
+        echo "--- Downloading SDK from ${SDK_URL} ---"
+        SDK_NAME=$(basename ${SDK_URL})
+        wget --no-verbose ${SDK_URL}
         echo "--- Extracting SDK: ${SDK_NAME} ---"
-        tar -xf ${SDK_NAME}
+        tar -I zstd -xf ${SDK_NAME}
         mv openwrt-sdk-* openwrt-sdk
         echo "--- SDK is ready in 'openwrt-sdk' directory ---"
 
