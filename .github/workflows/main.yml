@@ -60,6 +60,10 @@ jobs:
       run: |
         echo "--- Fetching SDK info for ${TARGET}/${SUBTARGET} (${BRANCH}) ---"
         SDK_NAME=$(curl -s https://downloads.openwrt.org/${BRANCH}/targets/${TARGET}/${SUBTARGET}/ | grep -oP 'openwrt-sdk-.*?tar.xz' | head -n 1)
+        if [ -z "$SDK_NAME" ]; then
+          echo "Error: Unable to find OpenWrt SDK archive. Exiting."
+          exit 1
+        fi
         wget --no-verbose https://downloads.openwrt.org/${BRANCH}/targets/${TARGET}/${SUBTARGET}/${SDK_NAME}
         echo "--- Extracting SDK: ${SDK_NAME} ---"
         tar -xf ${SDK_NAME}
