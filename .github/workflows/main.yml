@@ -1,175 +1,165 @@
-# =================================================================
-#            Build OpenWrt Package - Optimized Workflow
-# =================================================================
-#
-# This workflow includes:
-# - Correct YAML syntax and indentation.
-# - Robust SDK download step with detailed logging.
-# - Automatic selection of dependencies to prevent linker errors.
-# - Updated actions versions for better performance and security.
-#
-# =================================================================
-
-name: Build OpenWrt Package for AW1000
+name: Build OpenWrt package (DbusSmsForwardCPlus) for qualcommax/ipq807x (24.10.1)
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
-
-env:
-  TZ: Asia/Shanghai
+  push:
+    branches: [ master, main ]
+    paths:
+      - '**/*.cpp'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '.github/workflows/build-ipq807x.yml'
 
 jobs:
   build:
-    # Use a more modern runner environment
-    runs-on: ubuntu-22.04
-    
+    runs-on: ubuntu-latest
+    env:
+      SDK_URL: https://archive.openwrt.org/releases/24.10.1/targets/qualcommax/ipq807x/openwrt-sdk-24.10.1-qualcommax-ipq807x_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+      FEED_NAME: nox
+      PKG_NAME: dbus-sms-forward-cplus
     steps:
-    # -------------------------------------------------------------
-    # Step 1: Check out the repository code
-    # -------------------------------------------------------------
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    # -------------------------------------------------------------
-    # Step 2: Install necessary build dependencies on the runner
-    # -------------------------------------------------------------
-    - name: Initialize build environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget python3-pyelftools python3-setuptools python3-dev libpython3-dev subversion
+      - name: Install host build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gawk unzip wget rsync zstd libncurses5-dev zlib1g-dev python3 file git
 
-    # -------------------------------------------------------------
-    # Step 3: Download and extract the OpenWrt SDK
-    # This version includes detailed logging to debug download issues.
-    # -------------------------------------------------------------
-    - name: Download and Extract OpenWrt SDK
-      run: |
-        echo "--- Attempting to download SDK ---"
-        wget --no-verbose https://downloads.openwrt.org/releases/23.05.4/targets/ipq807x/generic/openwrt-sdk-23.05.4-ipq807x-generic_gcc-12.3.0_musl.Linux-x86_64.tar.xz || \
-        wget --no-verbose https://downloads.openwrt.org/snapshots/targets/ipq807x/generic/openwrt-sdk-ipq807x-generic_gcc-13.2.0_musl.Linux-x86_64.tar.xz
-        
-        echo "--- Listing downloaded files ---"
-        ls -lh *.tar.xz
-        
-        echo "--- Extracting SDK ---"
-        tar -xf openwrt-sdk-*.tar.xz
-        
-        echo "--- Listing extracted contents ---"
-        ls -l
-        
-        echo "--- Renaming SDK directory ---"
-        mv openwrt-sdk-* openwrt-sdk
-        echo "--- SDK is ready in 'openwrt-sdk' directory ---"
+      - name: Download & unpack OpenWrt SDK (24.10.1 / qualcommax/ipq807x)
+        run: |
+          mkdir -p $HOME/sdk && cd $HOME/sdk
+          wget -q $SDK_URL -O sdk.tar.zst
+          tar -I zstd -xf sdk.tar.zst
+          SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*" | head -n1)
+          echo "SDK_DIR=$HOME/sdk/$SDK_DIR" >> $GITHUB_ENV
 
-    # -------------------------------------------------------------
-    # Step 4: Prepare package source code inside the SDK
-    # -------------------------------------------------------------
-    - name: Prepare package source
-      run: |
-        cd openwrt-sdk
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-        # Copy the source code into the package directory
-        rsync -a --exclude='.git/' --exclude='.github/' $GITHUB_WORKSPACE/ openwrt-sdk/package/DbusSmsForwardCPlus/
+      - name: Prepare local feed (package recipe + init/config)
+        run: |
+          set -eux
+          mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/init.d
+          mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/config
 
-    # -------------------------------------------------------------
-    # Step 5: Create Makefiles needed for compilation
-    # -------------------------------------------------------------
-    - name: Create package Makefiles
-      run: |
-        # Main package Makefile
-        cat > openwrt-sdk/package/DbusSmsForwardCPlus/Makefile << 'EOL'
-        include $(TOPDIR)/rules.mk
-        PKG_NAME:=DbusSmsForwardCPlus
-        PKG_VERSION:=1.0.0
-        PKG_RELEASE:=1
-        PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
-        PKG_LICENSE:=GPL-3.0
-        include $(INCLUDE_DIR)/package.mk
-        define Package/DbusSmsForwardCPlus
-          SECTION:=utils
-          CATEGORY:=Utilities
-          TITLE:=SMS forwarding tool via D-Bus
-          DEPENDS:=+dbus +libcurl +libstdcpp +libpthread
-        endef
-        define Build/Prepare
-        	mkdir -p $(PKG_BUILD_DIR)
-        	$(CP) ./*.cpp $(PKG_BUILD_DIR)/ 2>/dev/null || true
-        	$(CP) ./*.h $(PKG_BUILD_DIR)/ 2>/dev/null || true
-        	$(CP) ./src/* $(PKG_BUILD_DIR)/ 2>/dev/null || true
-        endef
-        define Build/Compile
-        	$(MAKE) -C $(PKG_BUILD_DIR) \
-        		CC="$(TARGET_CC)" CXX="$(TARGET_CXX)" \
-        		CFLAGS="$(TARGET_CFLAGS)" CXXFLAGS="$(TARGET_CXXFLAGS) -std=c++11 -pthread" \
-        		LDFLAGS="$(TARGET_LDFLAGS)" LIBS="-ldbus-1 -lcurl -lpthread" \
-        		-f $(CURDIR)/Makefile.build
-        endef
-        define Package/DbusSmsForwardCPlus/install
-        	$(INSTALL_DIR) $(1)/usr/bin
-        	$(INSTALL_BIN) $(PKG_BUILD_DIR)/DbusSmsForwardCPlus $(1)/usr/bin/
-        endef
-        $(eval $(call BuildPackage,DbusSmsForwardCPlus))
-        EOL
+          # ------- OpenWrt package Makefile (构建/安装规则) -------
+          # 这里固定源码为你当前 fork + 触发工作流的这次提交
+          cat > $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/Makefile <<EOF
+          include \$(TOPDIR)/rules.mk
 
-        # Makefile for compiling the C++ code itself
-        cat > openwrt-sdk/package/DbusSmsForwardCPlus/Makefile.build << 'EOL'
-        SOURCES = $(wildcard *.cpp)
-        OBJECTS = $(SOURCES:.cpp=.o)
-        TARGET = DbusSmsForwardCPlus
-        CXXFLAGS += -std=c++11 -pthread -Wall -O2
-        LIBS += -ldbus-1 -lcurl -lpthread
-        all: $(TARGET)
-        $(TARGET): $(OBJECTS)
-        	$(CXX) $(OBJECTS) -o $@ $(LDFLAGS) $(LIBS)
-        %.o: %.cpp
-        	$(CXX) $(CXXFLAGS) -c $< -o $@
-        clean:
-        	rm -f $(OBJECTS) $(TARGET)
-        EOL
+          PKG_NAME:=${{ env.PKG_NAME }}
+          PKG_RELEASE:=1
 
-    # -------------------------------------------------------------
-    # Step 6: Configure build and automatically select dependencies
-    # This step is crucial to prevent linker errors.
-    # -------------------------------------------------------------
-    - name: Generate configuration and select packages
-      run: |
-        cd openwrt-sdk
-        make defconfig
-        echo "CONFIG_PACKAGE_DbusSmsForwardCPlus=m" >> .config
-        echo "CONFIG_PACKAGE_libcurl=m" >> .config
-        echo "CONFIG_PACKAGE_dbus=m" >> .config
-        echo "CONFIG_PACKAGE_libstdcpp=m" >> .config
-        make defconfig
+          PKG_SOURCE_PROTO:=git
+          PKG_SOURCE_URL:=https://github.com/noxsk/DbusSmsForwardCPlus.git
+          PKG_SOURCE_VERSION:=${{ github.sha }}
+          PKG_MIRROR_HASH:=skip
 
-    # -------------------------------------------------------------
-    # Step 7: Compile the package
-    # -------------------------------------------------------------
-    - name: Build the package
-      run: |
-        cd openwrt-sdk
-        make package/DbusSmsForwardCPlus/compile V=s -j$(nproc)
-        
-    # -------------------------------------------------------------
-    # Step 8: Organize and prepare artifacts for upload
-    # -------------------------------------------------------------
-    - name: Organize files for upload
-      run: |
-        mkdir -p ./artifact
-        find openwrt-sdk/bin/ -name "*.ipk" -exec cp {} ./artifact/ \;
-        
-    # -------------------------------------------------------------
-    # Step 9: Upload the compiled .ipk file
-    # -------------------------------------------------------------
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: DbusSmsForwardCPlus-AW1000-ipk
-        path: ./artifact/*.ipk
+          PKG_BUILD_DIR:=\$(BUILD_DIR)/\$(PKG_NAME)-\$(PKG_SOURCE_VERSION)
+          # 源码位于子目录 DbusSmsForwardCPlus
+          MAKE_PATH:=DbusSmsForwardCPlus
+
+          PKG_LICENSE:=unknown
+          PKG_MAINTAINER:=noxsk
+
+          include \$(INCLUDE_DIR)/package.mk
+
+          define Package/\$(PKG_NAME)
+            SECTION:=utils
+            CATEGORY:=Utilities
+            TITLE:=Dbus SMS Forwarder (C++)
+            URL:=https://github.com/noxsk/DbusSmsForwardCPlus
+            DEPENDS:=+libdbus +libopenssl +libstdcpp +libpthread +ca-bundle
+          endef
+
+          define Package/\$(PKG_NAME)/description
+          C++ D-Bus SMS forwarder using ModemManager (Email/PushPlus/WeCom/TG/DingTalk/Bark/Shell), with a simple Web API/page to send SMS.
+          endef
+
+          # dbus 头文件路径（OpenWrt SDK 提供）
+          DBUS_CFLAGS := -I\$(STAGING_DIR)/usr/include/dbus-1.0 -I\$(STAGING_DIR)/usr/lib/dbus-1.0/include
+
+          define Build/Compile
+          	\$(TARGET_CXX) \$(TARGET_CXXFLAGS) -std=c++17 -Os -DCPPHTTPLIB_OPENSSL_SUPPORT \\
+          		-I\$(PKG_BUILD_DIR)/DbusSmsForwardCPlus \\
+          		-I\$(PKG_BUILD_DIR)/DbusSmsForwardCPlus/rapidjson \\
+          		\$(DBUS_CFLAGS) \\
+          		\$(PKG_BUILD_DIR)/DbusSmsForwardCPlus/*.cpp \\
+          		\$(PKG_BUILD_DIR)/DbusSmsForwardCPlus/*/*.cpp \\
+          		-o \$(PKG_BUILD_DIR)/DbusSmsForwardCPlus/DbusSmsForwardCPlus \\
+          		\$(TARGET_LDFLAGS) -ldbus-1 -lssl -lcrypto -lpthread
+          endef
+
+          define Package/\$(PKG_NAME)/install
+          	\$(INSTALL_DIR) \$(1)/usr/bin
+          	\$(INSTALL_BIN) \$(PKG_BUILD_DIR)/DbusSmsForwardCPlus/DbusSmsForwardCPlus \$(1)/usr/bin/DbusSmsForwardCPlus
+
+          	\$(INSTALL_DIR) \$(1)/etc/init.d
+          	\$(INSTALL_BIN) ./files/etc/init.d/\$(PKG_NAME) \$(1)/etc/init.d/\$(PKG_NAME)
+
+          	\$(INSTALL_DIR) \$(1)/etc/config
+          	\$(INSTALL_CONF) ./files/etc/config/\$(PKG_NAME) \$(1)/etc/config/\$(PKG_NAME)
+          endef
+
+          \$(eval \$(call BuildPackage,\$(PKG_NAME)))
+          EOF
+
+          # ------- procd 启动脚本 -------
+          cat > $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/init.d/${{ env.PKG_NAME }} <<'EOF'
+          #!/bin/sh /etc/rc.common
+          START=95
+          USE_PROCD=1
+          CFG=dbus-sms-forward-cplus
+
+          start_service() {
+              . /lib/functions.sh
+              config_load $CFG
+              config_get_bool enabled main enabled 0
+              [ "$enabled" -eq 1 ] || exit 0
+              config_get conf main configfile "/etc/dbus-sms-forward-cplus/config.txt"
+              config_get args main args ""
+
+              mkdir -p /etc/dbus-sms-forward-cplus
+              [ -f "$conf" ] || touch "$conf"
+
+              procd_open_instance
+              procd_set_param command /usr/bin/DbusSmsForwardCPlus --configfile="$conf" $args
+              procd_set_param respawn 3600 5 5
+              procd_set_param stdout 1
+              procd_set_param stderr 1
+              procd_close_instance
+          }
+          EOF
+          chmod +x $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/init.d/${{ env.PKG_NAME }}
+
+          # ------- UCI 配置示例 -------
+          cat > $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/config/${{ env.PKG_NAME }} <<'EOF'
+          config main 'main'
+              option enabled '1'
+              option configfile '/etc/dbus-sms-forward-cplus/config.txt'
+              option args '--sendsmsapi=enable -fB -fP'
+          EOF
+
+      - name: Build with SDK
+        run: |
+          set -eux
+          cd "$SDK_DIR"
+          # 使用 SDK 自带 feeds，并追加本地 feed
+          cp feeds.conf.default feeds.conf
+          echo "src-link $FEED_NAME $GITHUB_WORKSPACE/openwrt-packages" >> feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install $PKG_NAME
+          make defconfig
+          make package/${{ env.PKG_NAME }}/compile V=s -j$(nproc)
+          make package/index
+          PKG_DIR=$(ls -d bin/packages/*/$FEED_NAME | head -n1)
+          echo "PKG_DIR=$PKG_DIR" >> $GITHUB_ENV
+          echo "ARCH_DIR=$(echo $PKG_DIR | sed 's#.*/bin/packages/\(.*\)/.*#\1#')" >> $GITHUB_ENV
+
+      - name: Upload ipk artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}-qualcommax-ipq807x-24.10.1-${{ env.ARCH_DIR }}
+          path: |
+            ${{ env.PKG_DIR }}/${{ env.PKG_NAME }}_*.ipk
+            ${{ env.PKG_DIR }}/Packages*
