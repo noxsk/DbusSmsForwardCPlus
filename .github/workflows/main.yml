@@ -18,7 +18,6 @@ jobs:
       SDK_URL: https://archive.openwrt.org/releases/24.10.1/targets/qualcommax/ipq807x/openwrt-sdk-24.10.1-qualcommax-ipq807x_gcc-13.3.0_musl.Linux-x86_64.tar.zst
       FEED_NAME: nox
       PKG_NAME: dbus-sms-forward-cplus
-      # SDK 解压后的固定路径（与 SDK 文件名一致）
       SDK_DIR: /home/runner/sdk/openwrt-sdk-24.10.1-qualcommax-ipq807x_gcc-13.3.0_musl.Linux-x86_64
 
     steps:
@@ -46,7 +45,6 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/init.d
           mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/config
 
-          # -------- OpenWrt 包配方（Makefile） --------
           cat > $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/Makefile <<'EOF'
           include $(TOPDIR)/rules.mk
 
@@ -75,7 +73,6 @@ jobs:
           C++ D-Bus SMS forwarder using ModemManager (Email/PushPlus/WeCom/TG/DingTalk/Bark/Shell), with a simple Web API/page to send SMS.
           endef
 
-          # dbus 头文件路径（来自 SDK 的 staging）
           DBUS_CFLAGS := -I$(STAGING_DIR)/usr/include/dbus-1.0 -I$(STAGING_DIR)/usr/lib/dbus-1.0/include
 
           define Build/Compile
@@ -102,13 +99,11 @@ jobs:
           $(eval $(call BuildPackage,$(PKG_NAME)))
           EOF
 
-          # -------- procd 自启动脚本 --------
           cat > $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/init.d/${PKG_NAME} <<'EOF'
           #!/bin/sh /etc/rc.common
           START=95
           USE_PROCD=1
           CFG=dbus-sms-forward-cplus
-
           start_service() {
               . /lib/functions.sh
               config_load $CFG
@@ -116,10 +111,8 @@ jobs:
               [ "$enabled" -eq 1 ] || exit 0
               config_get conf main configfile "/etc/dbus-sms-forward-cplus/config.txt"
               config_get args main args ""
-
               mkdir -p /etc/dbus-sms-forward-cplus
               [ -f "$conf" ] || touch "$conf"
-
               procd_open_instance
               procd_set_param command /usr/bin/DbusSmsForwardCPlus --configfile="$conf" $args
               procd_set_param respawn 3600 5 5
@@ -130,7 +123,6 @@ jobs:
           EOF
           chmod +x $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/init.d/${PKG_NAME}
 
-          # -------- UCI 配置示例 --------
           cat > $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/config/${PKG_NAME} <<'EOF'
           config main 'main'
               option enabled '1'
@@ -138,14 +130,14 @@ jobs:
               option args '--sendsmsapi=enable -fB -fP'
           EOF
 
-      - name: Build with SDK (GitHub mirrors + minimal feeds + retry)
+      - name: Build with SDK (GitHub mirrors + minimal feeds + robust install)
         env:
           GIT_COMMIT: ${{ github.sha }}
         run: |
           set -euxo pipefail
           cd "$SDK_DIR"
 
-          # 使用 GitHub 镜像，仅拉 base + packages，再挂载你的本地 feed
+          # 仅 base + packages + 你的本地 feed（GitHub 镜像更稳）
           cat > feeds.conf <<'EOF'
           src-git base https://github.com/openwrt/openwrt.git;openwrt-24.10
           src-git packages https://github.com/openwrt/packages.git;openwrt-24.10
@@ -162,28 +154,41 @@ jobs:
           retry ./scripts/feeds update packages
           ./scripts/feeds update nox
 
-          # 安装依赖与本地包
-          ./scripts/feeds install -p packages openssl dbus
-          ./scripts/feeds install -p nox ${PKG_NAME}
+          # 列一下 feed/nox 视图（调试）
+          ls -la feeds || true
+          ls -la feeds/nox || true
+          find feeds/nox -maxdepth 2 -type f -name Makefile || true
+
+          # 尝试通过 feeds 安装到 package/feeds/<FEED_NAME>，不行再兜底
+          ./scripts/feeds install -p packages openssl dbus || true
+          ./scripts/feeds install -p nox ${PKG_NAME} || true
+          ./scripts/feeds install -a -p nox || true
+
+          # 兜底：若仍未出现，则手动建到 package/feeds/<FEED_NAME>/<PKG_NAME>
+          if [ ! -d "package/feeds/${FEED_NAME}/${PKG_NAME}" ]; then
+            echo "feeds install didn't materialize package; creating manual symlink..."
+            mkdir -p "package/feeds/${FEED_NAME}"
+            ln -sf "$GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}" "package/feeds/${FEED_NAME}/${PKG_NAME}"
+          fi
+
+          # 最终确认
+          test -d "package/feeds/${FEED_NAME}/${PKG_NAME}" || {
+            echo "Package still missing under package/feeds/${FEED_NAME}/${PKG_NAME}"
+            find package/feeds -maxdepth 2 -type d
+            exit 1
+          }
 
           make defconfig
 
-          # 确认包路径（通过 feed 安装后应在 package/feeds/<FEED_NAME>/<PKG_NAME>）
-          test -d "package/feeds/${FEED_NAME}/${PKG_NAME}" || { 
-            echo "Package not found under package/feeds/${FEED_NAME}/${PKG_NAME}"; 
-            find package/feeds -maxdepth 2 -type d; 
-            exit 1; 
-          }
-
-          # 先编好 openssl、dbus（保证头文件和库进入 staging）
+          # 先把依赖打到 staging
           make -j"$(nproc)" V=s \
             package/feeds/packages/openssl/compile \
             package/feeds/packages/dbus/compile
 
-          # 再编你的包（带 feed 前缀）
+          # 编译你的包
           make -j"$(nproc)" V=s package/feeds/${FEED_NAME}/${PKG_NAME}/compile
 
-          # 生成 Packages 索引并记录输出目录
+          # 输出索引
           make package/index
           echo "PKG_DIR=$(ls -d bin/packages/*/${FEED_NAME} | head -n1)" >> $GITHUB_ENV
 
