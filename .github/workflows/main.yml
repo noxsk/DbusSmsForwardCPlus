@@ -3,8 +3,9 @@ name: Build OpenWrt package (DbusSmsForwardCPlus) for qualcommax/ipq807x (24.10.
 on:
   workflow_dispatch:
   push:
-    branches: [ master, main ]
+    branches: [ main, master ]
     paths:
+      - 'DbusSmsForwardCPlus/**'
       - '**/*.cpp'
       - '**/*.h'
       - '**/*.hpp'
@@ -17,6 +18,9 @@ jobs:
       SDK_URL: https://archive.openwrt.org/releases/24.10.1/targets/qualcommax/ipq807x/openwrt-sdk-24.10.1-qualcommax-ipq807x_gcc-13.3.0_musl.Linux-x86_64.tar.zst
       FEED_NAME: nox
       PKG_NAME: dbus-sms-forward-cplus
+      # SDK 解压后的固定路径（与 SDK 文件名一致）
+      SDK_DIR: /home/runner/sdk/openwrt-sdk-24.10.1-qualcommax-ipq807x_gcc-13.3.0_musl.Linux-x86_64
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,34 +30,24 @@ jobs:
       - name: Install host build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential gawk unzip wget rsync zstd libncurses5-dev zlib1g-dev python3 file git
+          sudo apt-get install -y build-essential gawk unzip wget rsync zstd libncurses5-dev zlib1g-dev python3 file git ca-certificates
 
-      - name: Download & unpack OpenWrt SDK (24.10.1 / qualcommax/ipq807x)
+      - name: Download & unpack OpenWrt SDK
         run: |
-          mkdir -p $HOME/sdk && cd $HOME/sdk
+          set -euxo pipefail
+          mkdir -p /home/runner/sdk && cd /home/runner/sdk
           wget -q $SDK_URL -O sdk.tar.zst
           tar -I zstd -xf sdk.tar.zst
-          SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*" | head -n1)
-          echo "SDK_DIR=$HOME/sdk/$SDK_DIR" >> $GITHUB_ENV
-
-      # （可选）缓存 dl 与 feeds，减少重复下载，提升稳定性
-      - name: Cache dl and feeds
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.SDK_DIR }}/dl
-            ${{ env.SDK_DIR }}/feeds
-          key: openwrt-24.10.1-ipq807x-${{ hashFiles('.github/workflows/build-ipq807x.yml') }}
-          restore-keys: |
-            openwrt-24.10.1-ipq807x-
+          test -d "$SDK_DIR"
 
       - name: Prepare local feed (package recipe + init/config)
         run: |
-          set -eux
-          mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/init.d
-          mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/config
+          set -euxo pipefail
+          mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/init.d
+          mkdir -p $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/config
 
-          cat > $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/Makefile <<'EOF'
+          # -------- OpenWrt 包配方（Makefile） --------
+          cat > $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/Makefile <<'EOF'
           include $(TOPDIR)/rules.mk
 
           PKG_NAME:=dbus-sms-forward-cplus
@@ -66,9 +60,6 @@ jobs:
 
           PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_SOURCE_VERSION)
           MAKE_PATH:=DbusSmsForwardCPlus
-
-          PKG_LICENSE:=unknown
-          PKG_MAINTAINER:=noxsk
 
           include $(INCLUDE_DIR)/package.mk
 
@@ -84,16 +75,15 @@ jobs:
           C++ D-Bus SMS forwarder using ModemManager (Email/PushPlus/WeCom/TG/DingTalk/Bark/Shell), with a simple Web API/page to send SMS.
           endef
 
-          # dbus 头文件（OpenWrt SDK 提供）
+          # dbus 头文件路径（来自 SDK 的 staging）
           DBUS_CFLAGS := -I$(STAGING_DIR)/usr/include/dbus-1.0 -I$(STAGING_DIR)/usr/lib/dbus-1.0/include
 
           define Build/Compile
-            $(TARGET_CXX) $(TARGET_CXXFLAGS) -std=c++17 -Os -DCPPHTTPLIB_OPENSSL_SUPPORT \
+            $(TARGET_CXX) $(TARGET_CXXFLAGS) -std=c++17 -Os -pipe -fno-plt -DCPPHTTPLIB_OPENSSL_SUPPORT \
               -I$(PKG_BUILD_DIR)/DbusSmsForwardCPlus \
               -I$(PKG_BUILD_DIR)/DbusSmsForwardCPlus/rapidjson \
               $(DBUS_CFLAGS) \
-              $(PKG_BUILD_DIR)/DbusSmsForwardCPlus/*.cpp \
-              $(PKG_BUILD_DIR)/DbusSmsForwardCPlus/*/*.cpp \
+              $$(find $(PKG_BUILD_DIR)/DbusSmsForwardCPlus -type f -name '*.cpp' | tr '\n' ' ') \
               -o $(PKG_BUILD_DIR)/DbusSmsForwardCPlus/DbusSmsForwardCPlus \
               $(TARGET_LDFLAGS) -ldbus-1 -lssl -lcrypto -lpthread
           endef
@@ -112,7 +102,8 @@ jobs:
           $(eval $(call BuildPackage,$(PKG_NAME)))
           EOF
 
-          cat > $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/init.d/${{ env.PKG_NAME }} <<'EOF'
+          # -------- procd 自启动脚本 --------
+          cat > $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/init.d/${PKG_NAME} <<'EOF'
           #!/bin/sh /etc/rc.common
           START=95
           USE_PROCD=1
@@ -137,62 +128,69 @@ jobs:
               procd_close_instance
           }
           EOF
-          chmod +x $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/init.d/${{ env.PKG_NAME }}
+          chmod +x $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/init.d/${PKG_NAME}
 
-          cat > $GITHUB_WORKSPACE/openwrt-packages/${{ env.PKG_NAME }}/files/etc/config/${{ env.PKG_NAME }} <<'EOF'
+          # -------- UCI 配置示例 --------
+          cat > $GITHUB_WORKSPACE/openwrt-packages/${PKG_NAME}/files/etc/config/${PKG_NAME} <<'EOF'
           config main 'main'
               option enabled '1'
               option configfile '/etc/dbus-sms-forward-cplus/config.txt'
               option args '--sendsmsapi=enable -fB -fP'
           EOF
 
-      - name: Build with SDK (use GitHub mirrors + minimal feeds + retry)
+      - name: Build with SDK (GitHub mirrors + minimal feeds + retry)
         env:
           GIT_COMMIT: ${{ github.sha }}
         run: |
-          set -eux
+          set -euxo pipefail
           cd "$SDK_DIR"
 
-          # 只用 base + packages（GitHub镜像），不拉 luci/routing/telephony，避免 503 和无关报错
+          # 使用 GitHub 镜像，仅拉 base + packages，再挂载你的本地 feed
           cat > feeds.conf <<'EOF'
           src-git base https://github.com/openwrt/openwrt.git;openwrt-24.10
           src-git packages https://github.com/openwrt/packages.git;openwrt-24.10
           src-link nox $GITHUB_WORKSPACE/openwrt-packages
           EOF
 
-          # 为不稳定网络增加容错
           git config --global protocol.version 2
           git config --global http.postBuffer 524288000
-          git config --global http.lowSpeedLimit 0
-          git config --global http.lowSpeedTime 999999
           export GIT_TERMINAL_PROMPT=0
 
           retry() { n=0; until "$@"; do n=$((n+1)); [ $n -ge 5 ] && exit 1; sleep $((10*n)); done; }
 
-          # 分 feed 更新并重试
           retry ./scripts/feeds update base
           retry ./scripts/feeds update packages
           ./scripts/feeds update nox
 
-          # 安装所需 recipe
-          ./scripts/feeds install -p packages openssl dbus ca-bundle ca-certificates || true
-          ./scripts/feeds install -p nox $PKG_NAME
+          # 安装依赖与本地包
+          ./scripts/feeds install -p packages openssl dbus
+          ./scripts/feeds install -p nox ${PKG_NAME}
 
-          # 构建
           make defconfig
-          # 先把依赖打到 staging，再编译主包（可选：显式先编 openssl/dbus）
-          make -j$(nproc) V=s package/openssl/compile package/dbus/compile
-          make -j$(nproc) V=s package/${PKG_NAME}/compile
-          make package/index
 
-          PKG_DIR=$(ls -d bin/packages/*/${FEED_NAME} | head -n1)
-          echo "PKG_DIR=$PKG_DIR" >> $GITHUB_ENV
-          echo "ARCH_DIR=$(echo $PKG_DIR | sed 's#.*/bin/packages/\(.*\)/.*#\1#')" >> $GITHUB_ENV
+          # 确认包路径（通过 feed 安装后应在 package/feeds/<FEED_NAME>/<PKG_NAME>）
+          test -d "package/feeds/${FEED_NAME}/${PKG_NAME}" || { 
+            echo "Package not found under package/feeds/${FEED_NAME}/${PKG_NAME}"; 
+            find package/feeds -maxdepth 2 -type d; 
+            exit 1; 
+          }
+
+          # 先编好 openssl、dbus（保证头文件和库进入 staging）
+          make -j"$(nproc)" V=s \
+            package/feeds/packages/openssl/compile \
+            package/feeds/packages/dbus/compile
+
+          # 再编你的包（带 feed 前缀）
+          make -j"$(nproc)" V=s package/feeds/${FEED_NAME}/${PKG_NAME}/compile
+
+          # 生成 Packages 索引并记录输出目录
+          make package/index
+          echo "PKG_DIR=$(ls -d bin/packages/*/${FEED_NAME} | head -n1)" >> $GITHUB_ENV
 
       - name: Upload ipk artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PKG_NAME }}-qualcommax-ipq807x-24.10.1-${{ env.ARCH_DIR }}
+          name: dbus-sms-forward-cplus-qualcommax-ipq807x-24.10.1
           path: |
-            ${{ env.PKG_DIR }}/${{ env.PKG_NAME }}_*.ipk
+            ${{ env.PKG_DIR }}/dbus-sms-forward-cplus_*.ipk
             ${{ env.PKG_DIR }}/Packages*
