@@ -1,13 +1,12 @@
-name: Build DbusSmsForwardCPlus for AW1000 (ipq807x / aarch64_cortex-a53)
+name: Build DbusSmsForwardCPlus IPK for AW1000 (ipq807x / aarch64_cortex-a53)
 
 on:
   workflow_dispatch:
   push:
     branches: [ master, main ]
-  pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   SDK_URL: https://archive.openwrt.org/releases/24.10.1/targets/qualcommax/ipq807x/openwrt-sdk-24.10.1-qualcommax-ipq807x_gcc-13.3.0_musl.Linux-x86_64.tar.zst
@@ -24,16 +23,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build prerequisites
+      - name: Install prerequisites
         run: |
           sudo apt-get update
-          # zstd 为 .tar.zst 解包必需；其余为常见 SDK 构建所需
           sudo apt-get install -y --no-install-recommends \
             build-essential gawk libncurses5-dev libssl-dev \
             unzip rsync file wget curl ca-certificates \
-            python3 xz-utils zstd
+            python3 xz-utils zstd binutils dos2unix
 
-      - name: Download and extract OpenWrt SDK (24.10.1 ipq807x)
+      - name: Download & extract OpenWrt SDK (24.10.1 ipq807x)
         run: |
           set -euxo pipefail
           mkdir -p "$GITHUB_WORKSPACE/sdk"
@@ -44,21 +42,32 @@ jobs:
           SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*" | head -n1)
           echo "SDK_DIR=$GITHUB_WORKSPACE/sdk/${SDK_DIR#./}" >> "$GITHUB_ENV"
 
-      - name: Prepare feeds (packages/luci/routing/telephony etc.)
+      - name: Prepare feeds
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -euxo pipefail
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Import package into SDK
+      - name: Normalize & patch package metadata; import into SDK
         run: |
           set -euxo pipefail
-          # 清理并拷贝当前仓库（去掉 .git/.github 等），作为 SDK 内的本地包
+          # 规范顶层 Makefile（避免某些提交的行尾/段名问题）
+          if [ -f Makefile ]; then
+            dos2unix Makefile || true
+            # 修复错误的描述段名，避免打包描述丢失影响生成
+            sed -i 's#^[[:space:]]*define[[:space:]]\+Package/myprogram/description#define Package/${{ env.PACKAGE_NAME }}/description#' Makefile || true
+            # 有的版本用 PKG_RELEASE 存了版本号，转为常规写法（不影响已有能正常打包的情况）
+            if grep -q 'PKG_RELEASE:=1.0' Makefile; then
+              sed -i -E 's#PKG_RELEASE:=([0-9.]+)#PKG_VERSION:=\1\nPKG_RELEASE:=1#' Makefile || true
+            fi
+          fi
+
+          # 拷贝当前仓库作为本地包到 SDK
           rm -rf "${{ env.SDK_DIR }}/package/${{ env.PACKAGE_NAME }}"
           mkdir -p "${{ env.SDK_DIR }}/package/${{ env.PACKAGE_NAME }}"
           rsync -a --delete \
-            --exclude '.git*' --exclude '.github' --exclude 'sdk' \
+            --exclude '.git*' --exclude '.github' \
             ./ "${{ env.SDK_DIR }}/package/${{ env.PACKAGE_NAME }}/"
 
       - name: Build package
@@ -67,29 +76,64 @@ jobs:
           FORCE_UNSAFE_CONFIGURE: "1"
         run: |
           set -euxo pipefail
-          # 确保 host 工具在 PATH 中（SDK 的 make 会自行处理，但手动加更稳妥）
           export PATH="${PWD}/staging_dir/host/bin:${PATH}"
-          # 生成最小配置，避免 SDK 偶发状态问题
           make defconfig
-          # 仅编译本包（OpenWrt 会自动先构建所需依赖库的 -dev 头文件到 staging）
+          # 只编译本包（会自动先准备依赖到 staging_dir）
           make -j"$(nproc)" V=sc package/${{ env.PACKAGE_NAME }}/compile
 
-      - name: Collect ipk artifacts
+      - name: Locate or (fallback) build real .ipk (AR archive, not ZIP)
         working-directory: ${{ env.SDK_DIR }}
         run: |
           set -euxo pipefail
           mkdir -p "$GITHUB_WORKSPACE/output"
-          # 找出目标 ipk 并拷贝到 output/
-          find bin -type f -name "${{ env.PACKAGE_NAME }}_*.ipk" -exec cp -v {} "$GITHUB_WORKSPACE/output/" \;
-          # 备份一下构建日志以便排查（可选）
-          if [ -f build_dir/target-*/${{ env.PACKAGE_NAME }}*/.built ]; then
-            :
-          fi
-          ls -l "$GITHUB_WORKSPACE/output" || true
 
-      - name: Upload artifacts
+          # 先在 bin/ 下搜真正的 ipk
+          found=""
+          while IFS= read -r f; do
+            echo "Found IPK: $f"
+            cp -v "$f" "$GITHUB_WORKSPACE/output/"
+            found="yes"
+          done < <(find bin -type f \( -iname "*dbussmsforwardcplus*.ipk" -o -iname "*dbus*sms*forward*.ipk" \) | sort || true)
+
+          # 如果没搜到 ipk，则从 ipkg staging 目录用 ipkg-build/opkg-build 手动打包
+          if [ -z "${found}" ]; then
+            PKG_DIR=$(find build_dir/target-* -type d -path "*/ipkg-*/*${{ env.PACKAGE_NAME }}" | head -n1 || true)
+            if [ -n "$PKG_DIR" ]; then
+              echo "Fallback: packaging from staging dir: $PKG_DIR"
+              if [ -x "./scripts/ipkg-build" ]; then
+                ./scripts/ipkg-build -o root -g root "$PKG_DIR" "$GITHUB_WORKSPACE/output"
+              elif command -v opkg-build >/dev/null 2>&1; then
+                opkg-build -o root -g root "$PKG_DIR" "$GITHUB_WORKSPACE/output"
+              else
+                echo "ERROR: ipkg/opkg-build not found"; exit 1
+              fi
+            else
+              echo "ERROR: no ipk in bin/ and no ipkg staging dir found"; exit 1
+            fi
+          fi
+
+          # 校验产物确实是 ipk（Debian binary package/AR容器）
+          ls -l "$GITHUB_WORKSPACE/output"
+          for f in "$GITHUB_WORKSPACE"/output/*.ipk; do
+            echo "== file type =="
+            file "$f"
+            echo "== ar table =="
+            ar t "$f" >/dev/null
+          done
+
+      - name: Upload artifact (CI convenience; Actions会再打成zip，仅作备份)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PACKAGE_NAME }}-ipq807x-${{ env.ARCH }}
-          path: output/
+          path: output/*.ipk
+          if-no-files-found: error
           retention-days: 14
+
+      - name: Publish Release with raw .ipk (no extra zip)
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: owrt-${{ env.TARGET }}-${{ env.ARCH }}-${{ github.run_number }}
+          name: OpenWrt 24.10.1 ${ { env.TARGET } } ${ { env.ARCH } } build ${{ github.run_number }}
+          files: |
+            ${{ github.workspace }}/output/*.ipk
